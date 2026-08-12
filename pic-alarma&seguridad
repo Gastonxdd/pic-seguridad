@@ -1,0 +1,248 @@
+#include <Servo.h> 
+#include <SoftwareSerial.h>
+
+// --- PINES ---
+const int pinRojo = 6;
+const int pinVerde = 5;
+const int pinAzul = 4;
+const int pinBuzzer = 8;
+const int pinTrig = 2; 
+const int pinEcho = 3; 
+const int pinServo = 7; 
+const int pinBoton = 10;
+const int pinBotonAlarma = 9;
+const int pinTxESP = 11;
+const int pinRxESP = 12;
+
+// --- OBJETOS ---
+Servo miPuerta;
+SoftwareSerial espSerial(pinRxESP, pinTxESP);
+
+// --- CONFIGURACIÓN SERVO ---
+const int ANGULO_ABIERTO = 0;
+const int ANGULO_CERRADO = 170;
+
+// --- CONFIGURACIÓN DE DISTANCIA ---
+const int DISTANCIA_PISO = 18; 
+const int MARGEN_SEGURIDAD = 3; 
+const int UMBRAL_CORTE = DISTANCIA_PISO - MARGEN_SEGURIDAD; 
+
+// --- ESTADO ---
+bool puertaAbierta = false;
+bool estadoBotonPrevio = HIGH;
+unsigned long tiempoUltimoPulso = 0;
+bool esperandoSegundoPulso = false;
+const unsigned long INTERVALO_DOBLE_PULSO = 400;
+
+bool estadoBotonAlarmaPrevio = HIGH;
+int pulsosAlarma = 0;
+unsigned long tiempoUltimoPulsoAlarma = 0;
+const unsigned long INTERVALO_PULSOS_ALARMA = 600;
+const unsigned long DURACION_SIRENA = 3000;
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(pinRojo, OUTPUT);
+  pinMode(pinVerde, OUTPUT);
+  pinMode(pinAzul, OUTPUT);
+  pinMode(pinBuzzer, OUTPUT);
+  pinMode(pinTrig, OUTPUT);
+  pinMode(pinEcho, INPUT);
+  pinMode(pinBoton, INPUT_PULLUP);
+  pinMode(pinBotonAlarma, INPUT_PULLUP);
+
+  espSerial.begin(9600);
+
+  miPuerta.attach(pinServo);
+  miPuerta.write(ANGULO_CERRADO); 
+
+  colorRGB(255, 255, 255); 
+  Serial.println("SISTEMA INICIADO.");
+}
+
+void loop() {
+  bool estadoBoton = digitalRead(pinBoton);
+
+  if (estadoBoton == LOW && estadoBotonPrevio == HIGH) {
+    delay(50); 
+    if (digitalRead(pinBoton) == LOW) {
+      unsigned long ahora = millis();
+
+      if (esperandoSegundoPulso && ahora - tiempoUltimoPulso <= INTERVALO_DOBLE_PULSO) {
+        esperandoSegundoPulso = false;
+        accesoDenegado();
+      } else {
+        tiempoUltimoPulso = ahora;
+        esperandoSegundoPulso = true;
+      }
+    }
+  }
+
+  if (esperandoSegundoPulso && millis() - tiempoUltimoPulso > INTERVALO_DOBLE_PULSO) {
+    esperandoSegundoPulso = false;
+    puertaAbierta = !puertaAbierta;
+    if (puertaAbierta) {
+      abrirPuerta();
+    } else {
+      cerrarPuerta();
+    }
+  }
+
+  estadoBotonPrevio = estadoBoton;
+
+  bool estadoBotonAlarma = digitalRead(pinBotonAlarma);
+
+  if (estadoBotonAlarma == LOW && estadoBotonAlarmaPrevio == HIGH) {
+    delay(50);
+    if (digitalRead(pinBotonAlarma) == LOW) {
+      pulsosAlarma++;
+      tiempoUltimoPulsoAlarma = millis();
+    }
+  }
+
+  estadoBotonAlarmaPrevio = estadoBotonAlarma;
+
+  if (pulsosAlarma > 0 && millis() - tiempoUltimoPulsoAlarma > INTERVALO_PULSOS_ALARMA) {
+    switch (pulsosAlarma) {
+      case 1:
+        alarmaCompleta();
+        break;
+      case 2:
+        enviarSenal();
+        break;
+      case 3:
+        alarmaLocal();
+        break;
+    }
+    pulsosAlarma = 0;
+  }
+}
+
+// --- FUNCIONES ---
+
+void alarmaCompleta() {
+  Serial.println("🚨 ALARMA: sirena + luces + SEÑAL enviada");
+  sirenaPolicial();
+  enviarSenal();
+}
+
+void alarmaLocal() {
+  Serial.println("🚨 ALARMA LOCAL: sirena + luces (sin señal)");
+  sirenaPolicial();
+}
+
+void sirenaPolicial() {
+  unsigned long inicio = millis();
+  bool rojo = true;
+
+  while (millis() - inicio < DURACION_SIRENA) {
+    for (int f = 500; f < 1500; f += 25) {
+      tone(pinBuzzer, f);
+      colorRGB(rojo ? 255 : 0, 0, rojo ? 0 : 255);
+      delay(25);
+      if (millis() - inicio >= DURACION_SIRENA) break;
+    }
+    rojo = !rojo;
+    for (int f = 1500; f > 500; f -= 25) {
+      tone(pinBuzzer, f);
+      colorRGB(rojo ? 255 : 0, 0, rojo ? 0 : 255);
+      delay(25);
+      if (millis() - inicio >= DURACION_SIRENA) break;
+    }
+    rojo = !rojo;
+  }
+
+  noTone(pinBuzzer);
+
+  if (puertaAbierta) {
+    colorRGB(0, 255, 0);
+  } else {
+    colorRGB(255, 255, 255);
+  }
+}
+
+void enviarSenal() {
+  Serial.println("SEÑAL ENVIADA AL ESP32-C3.");
+  espSerial.println("ALARM_TRIGGER");
+}
+
+void accesoDenegado() {
+  Serial.println("!!! ACCESO DENEGADO !!!");
+  
+  colorRGB(255, 0, 0); 
+  tone(pinBuzzer, 200, 200);
+  delay(250);
+  tone(pinBuzzer, 150, 300);
+  delay(500);
+
+  if (puertaAbierta) {
+    colorRGB(0, 255, 0);
+  } else {
+    colorRGB(255, 255, 255);
+  }
+}
+
+void abrirPuerta() {
+  Serial.println(" -> ABRIENDO PUERTA...");
+  
+  miPuerta.write(ANGULO_ABIERTO); 
+  colorRGB(0, 255, 0); 
+  
+  tone(pinBuzzer, 1500, 100); 
+  delay(150);
+  tone(pinBuzzer, 1500, 100); 
+
+  delay(1000); 
+  delay(2000); 
+
+  // LÓGICA DE SEGURIDAD CON TIMEOUT (Espera a que pase el obstáculo)
+  long distanciaActual = medirDistancia();
+  unsigned long tiempoInicioEspera = millis(); 
+  
+  while (distanciaActual < UMBRAL_CORTE && distanciaActual > 0) {
+    
+    if (millis() - tiempoInicioEspera > 10000) {
+      Serial.println("TIEMPO EXCEDIDO. Puerta queda abierta.");
+      tone(pinBuzzer, 500, 500); 
+      break; 
+    }
+
+    Serial.print("OBSTÁCULO (");
+    Serial.print(distanciaActual);
+    Serial.println("cm) - ESPERANDO...");
+    
+    colorRGB(0, 0, 0); delay(100);
+    colorRGB(0, 255, 0); delay(400);
+    
+    distanciaActual = medirDistancia();
+  }
+
+  colorRGB(0, 255, 0); 
+}
+
+void cerrarPuerta() {
+  Serial.println("Cerrando puerta...");
+  miPuerta.write(ANGULO_CERRADO);
+  delay(1000); 
+  colorRGB(255, 255, 255); 
+}
+
+void colorRGB(int r, int g, int b) {
+  analogWrite(pinRojo, r);
+  analogWrite(pinVerde, g);
+  analogWrite(pinAzul, b);
+}
+
+long medirDistancia() {
+  digitalWrite(pinTrig, LOW);
+  delayMicroseconds(2);
+  digitalWrite(pinTrig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(pinTrig, LOW);
+  
+  long duracion = pulseIn(pinEcho, HIGH, 25000); 
+  if (duracion == 0) return 999; 
+  
+  return duracion * 0.034 / 2;
+}
